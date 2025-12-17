@@ -1,0 +1,29 @@
+# Database Migrations Directory
+
+This directory contains database migration scripts for HushRyd backend.
+
+## Creating a new migration
+
+Create a new file with the naming convention: `YYYYMMDDHHMMSS_description.js`
+
+Example: `20241209120000_add_user_indexes.js`
+
+## Migration file structure
+
+```javascript
+module.exports = {
+  async up(mongoose) {
+    // Migration logic here
+  },
+  
+  async down(mongoose) {
+    // Rollback logic here
+  }
+};
+```
+
+## Running migrations
+
+- `npm run migrate` - Run all pending migrations
+- `npm run migrate:status` - Show migration status
+- `npm run migrate:rollback` - Rollback last migration

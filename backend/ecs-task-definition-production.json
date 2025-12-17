@@ -1,0 +1,110 @@
+{
+  "family": "hushryd-backend-production",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/hushryd-backend-task-role",
+  "containerDefinitions": [
+    {
+      "name": "hushryd-backend",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/hushryd-backend:production-${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "name": "PORT",
+          "value": "3000"
+        },
+        {
+          "name": "APP_VERSION",
+          "value": "${IMAGE_TAG}"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "MONGODB_URI",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:MONGODB_URI::"
+        },
+        {
+          "name": "JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:JWT_SECRET::"
+        },
+        {
+          "name": "TWILIO_ACCOUNT_SID",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:TWILIO_ACCOUNT_SID::"
+        },
+        {
+          "name": "TWILIO_AUTH_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:TWILIO_AUTH_TOKEN::"
+        },
+        {
+          "name": "SENDGRID_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:SENDGRID_API_KEY::"
+        },
+        {
+          "name": "AWS_S3_BUCKET",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:AWS_S3_BUCKET::"
+        },
+        {
+          "name": "ENCRYPTION_KEY",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:ENCRYPTION_KEY::"
+        },
+        {
+          "name": "REDIS_URL",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:prod/hushryd/backend:REDIS_URL::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/hushryd-backend-production",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 45
+      },
+      "stopTimeout": 30,
+      "startTimeout": 120,
+      "dependsOn": [],
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65536,
+          "hardLimit": 65536
+        }
+      ]
+    }
+  ],
+  "tags": [
+    {
+      "key": "Environment",
+      "value": "production"
+    },
+    {
+      "key": "Service",
+      "value": "hushryd-backend"
+    },
+    {
+      "key": "ManagedBy",
+      "value": "github-actions"
+    }
+  ]
+}

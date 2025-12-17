@@ -1,0 +1,46 @@
+version: 0.0
+# HushRyd Backend CodeDeploy AppSpec
+# Configures blue-green deployment with health checks and auto-rollback
+# Requirements: 2.4, 12.1 - Auto-rollback on failure within 60 seconds
+
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: <TASK_DEFINITION>
+        LoadBalancerInfo:
+          ContainerName: "hushryd-backend"
+          ContainerPort: 3000
+        PlatformVersion: "LATEST"
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - "${SUBNET_1}"
+              - "${SUBNET_2}"
+            SecurityGroups:
+              - "${SECURITY_GROUP}"
+            AssignPublicIp: "DISABLED"
+        # Capacity provider strategy for cost optimization
+        CapacityProviderStrategy:
+          - CapacityProvider: "FARGATE"
+            Weight: 1
+            Base: 1
+
+# Lifecycle hooks for deployment validation
+# Each hook has a 60-second timeout to meet rollback requirements
+Hooks:
+  # Runs before the replacement task set is created
+  - BeforeInstall: "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:hushryd-deploy-before-install"
+  
+  # Runs after the replacement task set is created but before traffic is shifted
+  - AfterInstall: "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:hushryd-deploy-after-install"
+  
+  # Runs after test traffic is routed to replacement task set
+  # This is where we run comprehensive health checks
+  - AfterAllowTestTraffic: "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:hushryd-deploy-health-check"
+  
+  # Runs before production traffic is shifted to replacement task set
+  - BeforeAllowTraffic: "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:hushryd-deploy-before-traffic"
+  
+  # Runs after all production traffic is shifted to replacement task set
+  - AfterAllowTraffic: "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:hushryd-deploy-after-traffic"

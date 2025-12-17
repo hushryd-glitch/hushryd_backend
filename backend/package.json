@@ -1,0 +1,67 @@
+{
+  "name": "hushryd-backend",
+  "version": "1.0.0",
+  "description": "HushRyd ride-sharing platform backend API",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "migrate": "node scripts/migrate.js up",
+    "migrate:status": "node scripts/migrate.js status",
+    "migrate:rollback": "node scripts/migrate.js rollback",
+    "migrate:staging": "NODE_ENV=staging node scripts/migrate.js up",
+    "migrate:production": "NODE_ENV=production node scripts/migrate.js up",
+    "load-test": "k6 run load-tests/concurrent-users.js",
+    "load-test:upload": "k6 run load-tests/document-upload.js",
+    "load-test:tracking": "k6 run load-tests/websocket-tracking.js",
+    "load-test:full": "k6 run load-tests/full-load-test.js",
+    "load-test:smoke": "k6 run --vus 10 --duration 1m load-tests/concurrent-users.js"
+  },
+  "keywords": [
+    "ride-sharing",
+    "express",
+    "mongodb"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.940.0",
+    "@aws-sdk/s3-request-presigner": "^3.940.0",
+    "@googlemaps/google-maps-services-js": "^3.4.2",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.65.1",
+    "cashfree-pg": "^5.1.0",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "express-rate-limit": "^8.2.1",
+    "express-validator": "^7.3.1",
+    "helmet": "^8.0.0",
+    "ioredis": "^5.8.2",
+    "joi": "^17.13.3",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^9.0.0",
+    "multer": "^2.0.2",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^7.0.11",
+    "pdf-lib": "^1.17.1",
+    "puppeteer": "^24.32.1",
+    "qrcode": "^1.5.4",
+    "rate-limit-redis": "^4.3.1",
+    "sharp": "^0.34.5",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "fast-check": "^4.3.0",
+    "jest": "^30.2.0",
+    "mongodb-memory-server": "^10.3.0"
+  }
+}

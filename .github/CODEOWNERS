@@ -1,0 +1,64 @@
+# CODEOWNERS - Define code owners for automatic review requests
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @hushryd/core-team
+
+# Backend API
+/backend/ @hushryd/backend-team
+/backend/src/services/ @hushryd/backend-team
+/backend/src/routes/ @hushryd/backend-team
+/backend/src/models/ @hushryd/backend-team
+/backend/src/middleware/ @hushryd/backend-team @hushryd/security-team
+
+# Frontend Web App
+/frontend/ @hushryd/frontend-team
+/frontend/src/components/ @hushryd/frontend-team
+/frontend/src/app/ @hushryd/frontend-team
+/frontend/src/hooks/ @hushryd/frontend-team
+
+# Mobile App
+/mobile-app/ @hushryd/mobile-team
+/mobile-app/app/ @hushryd/mobile-team
+/mobile-app/src/ @hushryd/mobile-team
+
+# CI/CD and DevOps
+/.github/ @hushryd/devops-team
+/.github/workflows/ @hushryd/devops-team
+/backend/render.yaml @hushryd/devops-team
+/mobile-app/eas.json @hushryd/devops-team @hushryd/mobile-team
+
+# Security-sensitive files (require security team review)
+/backend/src/middleware/auth.js @hushryd/security-team @hushryd/backend-team
+/backend/src/services/tokenService.js @hushryd/security-team
+/backend/src/services/otpService.js @hushryd/security-team
+/backend/src/services/encryptionService.js @hushryd/security-team
+/mobile-app/src/services/auth/ @hushryd/security-team @hushryd/mobile-team
+/mobile-app/src/services/storage/secureStorage.js @hushryd/security-team
+
+# Environment and configuration files
+*.env* @hushryd/devops-team @hushryd/security-team
+/backend/.env.example @hushryd/devops-team
+/frontend/.env.example @hushryd/devops-team
+/mobile-app/.env.example @hushryd/devops-team
+
+# Database models and migrations
+/backend/src/models/ @hushryd/backend-team @hushryd/dba-team
+
+# Admin and Super Admin features
+/backend/src/routes/admin.js @hushryd/backend-team @hushryd/security-team
+/backend/src/routes/superAdmin.js @hushryd/backend-team @hushryd/security-team
+/frontend/src/app/admin/ @hushryd/frontend-team @hushryd/security-team
+
+# SOS and Safety features (critical)
+/backend/src/services/sosService.js @hushryd/backend-team @hushryd/safety-team
+/backend/src/routes/sos.js @hushryd/backend-team @hushryd/safety-team
+/mobile-app/src/services/sos/ @hushryd/mobile-team @hushryd/safety-team
+
+# Payment and Financial
+/backend/src/services/paymentService.js @hushryd/backend-team @hushryd/finance-team
+/mobile-app/src/services/payment/ @hushryd/mobile-team @hushryd/finance-team
+
+# Documentation
+/README.md @hushryd/core-team
+/.kiro/specs/ @hushryd/core-team

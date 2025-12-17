@@ -1,0 +1,280 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [develop, staging, main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-ci.yml'
+  pull_request:
+    branches: [develop, staging, main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-ci.yml'
+
+env:
+  NODE_VERSION: '18'
+  WORKING_DIRECTORY: backend
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Run linting
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm run lint --if-present
+
+      - name: Run type checking
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm run type-check --if-present
+
+      - name: Run unit tests
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm test -- --coverage --passWithNoTests
+        env:
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-for-ci
+          MONGODB_URI: mongodb://localhost:27017/hushryd-test
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          directory: ${{ env.WORKING_DIRECTORY }}/coverage
+          flags: backend
+          fail_ci_if_error: false
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      # npm audit for vulnerability scanning - blocks on high/critical vulnerabilities
+      # Validates: Requirements 11.1, 11.2
+      - name: Run npm audit for vulnerabilities
+        id: npm-audit
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: |
+          echo "Running npm audit for high and critical vulnerabilities..."
+          npm audit --audit-level=high --json > audit-results.json 2>&1 || true
+          
+          # Parse audit results
+          VULNERABILITIES=$(cat audit-results.json | jq '.metadata.vulnerabilities // {}')
+          HIGH=$(echo $VULNERABILITIES | jq '.high // 0')
+          CRITICAL=$(echo $VULNERABILITIES | jq '.critical // 0')
+          
+          echo "high_count=$HIGH" >> $GITHUB_OUTPUT
+          echo "critical_count=$CRITICAL" >> $GITHUB_OUTPUT
+          
+          echo "## npm Audit Results" >> $GITHUB_STEP_SUMMARY
+          echo "- High severity: $HIGH" >> $GITHUB_STEP_SUMMARY
+          echo "- Critical severity: $CRITICAL" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$HIGH" -gt 0 ] || [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::Found $HIGH high and $CRITICAL critical vulnerabilities"
+            npm audit --audit-level=high
+            exit 1
+          fi
+          
+          echo "✅ No high or critical vulnerabilities found"
+
+      # Snyk deep security scanning - comprehensive vulnerability detection
+      # Validates: Requirements 11.1, 11.2
+      - name: Run Snyk security scan
+        id: snyk-scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --file=${{ env.WORKING_DIRECTORY }}/package.json
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+
+      - name: Upload Snyk results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: snyk.sarif
+
+      - name: Snyk scan summary
+        if: always()
+        run: |
+          echo "## Snyk Security Scan" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.snyk-scan.outcome }}" == "failure" ]; then
+            echo "⚠️ Snyk found high severity vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            echo "Review the Snyk results and fix vulnerabilities before merging" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No high severity vulnerabilities detected by Snyk" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Check for secrets in code - prevents accidental secret commits
+      # Validates: Requirements 7.2, 11.4
+      - name: Check for secrets in code
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./backend
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+      # Fail the job if Snyk found issues on push to protected branches
+      - name: Enforce security gate on protected branches
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging')
+        run: |
+          if [ "${{ steps.snyk-scan.outcome }}" == "failure" ]; then
+            echo "::error::Security scan failed - high severity vulnerabilities must be resolved before deployment"
+            exit 1
+          fi
+
+  build-docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Login to Amazon ECR
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+        uses: aws-actions/amazon-ecr-login@v2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            hushryd/backend
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/hushryd-backend
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # Build Docker image
+      # Validates: Requirements 2.1 - Build Docker image and run tests in isolated container
+      - name: Build Docker image
+        id: docker-build
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.WORKING_DIRECTORY }}
+          push: false
+          load: true
+          tags: hushryd/backend:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Scan Docker image for vulnerabilities
+      # Validates: Requirements 11.3 - Scan Docker image for container vulnerabilities
+      - name: Scan Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: hushryd/backend:scan
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Check for critical container vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: hushryd/backend:scan
+          format: 'table'
+          severity: 'CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      # Push Docker image to registries after security scan passes
+      # Validates: Requirements 2.1 - Push to container registry (ECR/Docker Hub)
+      - name: Push Docker image
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.WORKING_DIRECTORY }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Docker build summary
+        if: always()
+        run: |
+          echo "## Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: hushryd/backend" >> $GITHUB_STEP_SUMMARY
+          echo "- Tags: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.ref }}" == "refs/heads/staging" ]; then
+            echo "- Pushed to: Docker Hub, Amazon ECR" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Pushed: No (develop branch - build only)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  notify:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: failure()
+    
+    steps:
+      - name: Send Slack notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#ci-alerts'
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

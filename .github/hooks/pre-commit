@@ -1,0 +1,114 @@
+#!/bin/bash
+# ============================================
+# HushRyd Pre-Commit Hook - Secret Detection
+# ============================================
+# This hook prevents committing secrets to the repository
+# Install: cp .github/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# ============================================
+
+echo "🔍 Running secret detection..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Patterns to detect secrets
+PATTERNS=(
+    # AWS Keys
+    'AKIA[0-9A-Z]{16}'
+    'aws_secret_access_key\s*=\s*[A-Za-z0-9/+=]{40}'
+    
+    # Generic API Keys
+    'api[_-]?key\s*[=:]\s*["\x27][A-Za-z0-9_\-]{20,}["\x27]'
+    'apikey\s*[=:]\s*["\x27][A-Za-z0-9_\-]{20,}["\x27]'
+    
+    # JWT Secrets
+    'jwt[_-]?secret\s*[=:]\s*["\x27][^\s"'\'']{20,}["\x27]'
+    
+    # Private Keys
+    '-----BEGIN (RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----'
+    '-----BEGIN PGP PRIVATE KEY BLOCK-----'
+    
+    # MongoDB Connection Strings with credentials
+    'mongodb(\+srv)?://[^:]+:[^@]+@'
+    
+    # Twilio
+    'SK[a-z0-9]{32}'
+    'AC[a-z0-9]{32}'
+    
+    # SendGrid
+    'SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}'
+    
+    # Stripe
+    'sk_live_[A-Za-z0-9]{24,}'
+    'rk_live_[A-Za-z0-9]{24,}'
+    
+    # Razorpay
+    'rzp_live_[A-Za-z0-9]{14}'
+    
+    # Generic Passwords
+    'password\s*[=:]\s*["\x27][^\s"'\'']{8,}["\x27]'
+    
+    # Bearer Tokens
+    'bearer\s+[A-Za-z0-9_\-\.]{20,}'
+    
+    # Google API Keys
+    'AIza[0-9A-Za-z_-]{35}'
+)
+
+# Files to check (staged files only)
+FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+if [ -z "$FILES" ]; then
+    echo -e "${GREEN}✓ No files to check${NC}"
+    exit 0
+fi
+
+FOUND_SECRETS=0
+
+for file in $FILES; do
+    # Skip binary files and .env.example files
+    if [[ "$file" == *.env.example ]] || [[ "$file" == *.png ]] || [[ "$file" == *.jpg ]] || [[ "$file" == *.ico ]]; then
+        continue
+    fi
+    
+    # Skip if file doesn't exist (deleted files)
+    if [ ! -f "$file" ]; then
+        continue
+    fi
+    
+    for pattern in "${PATTERNS[@]}"; do
+        if grep -qiE "$pattern" "$file" 2>/dev/null; then
+            echo -e "${RED}⚠️  Potential secret found in: $file${NC}"
+            echo -e "${YELLOW}   Pattern: $pattern${NC}"
+            FOUND_SECRETS=1
+        fi
+    done
+done
+
+# Check for .env files being committed
+for file in $FILES; do
+    if [[ "$file" == *.env ]] && [[ "$file" != *.env.example ]]; then
+        echo -e "${RED}⚠️  Attempting to commit .env file: $file${NC}"
+        echo -e "${YELLOW}   .env files should never be committed!${NC}"
+        FOUND_SECRETS=1
+    fi
+done
+
+if [ $FOUND_SECRETS -eq 1 ]; then
+    echo ""
+    echo -e "${RED}❌ Commit blocked: Potential secrets detected!${NC}"
+    echo ""
+    echo "Please remove secrets from your code before committing."
+    echo "Use environment variables or AWS Secrets Manager instead."
+    echo ""
+    echo "If this is a false positive, you can bypass with:"
+    echo "  git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+echo -e "${GREEN}✓ No secrets detected${NC}"
+exit 0

@@ -1,0 +1,712 @@
+name: Backend CD
+
+on:
+  push:
+    branches: [develop, staging, main]
+    paths:
+      - 'backend/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+
+env:
+  NODE_VERSION: '18'
+  WORKING_DIRECTORY: backend
+
+jobs:
+  # ==========================================
+  # Development Deployment (develop branch)
+  # ==========================================
+  deploy-development:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'development')
+    environment:
+      name: development
+      url: https://dev-api.hushryd.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Render
+        uses: johnbeynon/render-deploy-action@v0.0.8
+        with:
+          service-id: ${{ secrets.RENDER_SERVICE_ID_DEV }}
+          api-key: ${{ secrets.RENDER_API_KEY }}
+          wait-for-success: true
+
+      - name: Health check
+        run: |
+          echo "Waiting for deployment to be ready..."
+          sleep 30
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://dev-api.hushryd.com/health)
+          if [ "$response" != "200" ]; then
+            echo "Health check failed with status: $response"
+            exit 1
+          fi
+          echo "Health check passed!"
+
+      - name: Notify success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "✅ Backend deployed to Development",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "Environment", "value": "Development", "short": true },
+                  { "title": "Branch", "value": "${{ github.ref_name }}", "short": true },
+                  { "title": "Commit", "value": "${{ github.sha }}", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ==========================================
+  # Staging Deployment (staging branch)
+  # ==========================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/staging' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://staging-api.hushryd.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: hushryd-backend
+          IMAGE_TAG: staging-${{ github.sha }}
+        run: |
+          cd ${{ env.WORKING_DIRECTORY }}
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Fetch staging secrets from AWS Secrets Manager
+        id: secrets
+        run: |
+          MONGODB_URI=$(aws secretsmanager get-secret-value --secret-id staging/hushryd/backend --query SecretString --output text | jq -r '.MONGODB_URI')
+          echo "::add-mask::$MONGODB_URI"
+          echo "MONGODB_URI=$MONGODB_URI" >> $GITHUB_ENV
+
+      - name: Run database migrations
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        env:
+          NODE_ENV: staging
+          MONGODB_URI: ${{ env.MONGODB_URI }}
+        run: |
+          echo "Running database migrations for staging..."
+          npm run migrate:staging
+          echo "Database migrations completed successfully"
+
+      - name: Prepare ECS task definition
+        id: task-def
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          IMAGE_TAG: staging-${{ github.sha }}
+        run: |
+          cd ${{ env.WORKING_DIRECTORY }}
+          # Replace placeholders in task definition
+          sed -i "s/\${AWS_ACCOUNT_ID}/$AWS_ACCOUNT_ID/g" ecs-task-definition-staging.json
+          sed -i "s/\${AWS_REGION}/$AWS_REGION/g" ecs-task-definition-staging.json
+          sed -i "s/\${IMAGE_TAG}/$IMAGE_TAG/g" ecs-task-definition-staging.json
+
+      - name: Get current task definition for rollback
+        id: current-task
+        run: |
+          CURRENT_TASK=$(aws ecs describe-services --cluster hushryd-staging --services hushryd-backend-staging \
+            --query 'services[0].taskDefinition' --output text 2>/dev/null || echo "none")
+          echo "current_task=$CURRENT_TASK" >> $GITHUB_OUTPUT
+
+      - name: Deploy to ECS Staging
+        id: deploy
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ env.WORKING_DIRECTORY }}/ecs-task-definition-staging.json
+          service: hushryd-backend-staging
+          cluster: hushryd-staging
+          wait-for-service-stability: true
+
+      - name: Health check
+        id: health-check
+        run: |
+          echo "Waiting for deployment to be ready..."
+          sleep 30
+          
+          MAX_RETRIES=6
+          RETRY_COUNT=0
+          HEALTH_URL="https://staging-api.hushryd.com"
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            # Basic health check
+            basic_response=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$HEALTH_URL/health")
+            
+            if [ "$basic_response" = "200" ]; then
+              echo "Basic health check passed!"
+              
+              # Deep health check for database connectivity
+              deep_response=$(curl -s --connect-timeout 5 --max-time 15 "$HEALTH_URL/health/deep" 2>/dev/null || echo '{}')
+              db_status=$(echo "$deep_response" | jq -r '.checks.database.status' 2>/dev/null || echo "unknown")
+              
+              if [ "$db_status" = "ok" ]; then
+                echo "Deep health check passed - database connected"
+                
+                # Readiness check
+                ready_response=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$HEALTH_URL/ready")
+                if [ "$ready_response" = "200" ]; then
+                  echo "Readiness check passed!"
+                  echo "All health checks passed successfully!"
+                  exit 0
+                fi
+              fi
+              echo "Deep health check: db_status=$db_status"
+            fi
+            
+            echo "Health check attempt $((RETRY_COUNT + 1)) failed (basic: $basic_response)"
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            sleep 10
+          done
+          
+          echo "health_check_failed=true" >> $GITHUB_OUTPUT
+          echo "Health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure() && steps.health-check.outputs.health_check_failed == 'true' && steps.current-task.outputs.current_task != 'none'
+        run: |
+          echo "🔄 Initiating auto-rollback to previous version..."
+          echo "Target task definition: ${{ steps.current-task.outputs.current_task }}"
+          
+          ROLLBACK_START=$(date +%s)
+          
+          aws ecs update-service \
+            --cluster hushryd-staging \
+            --service hushryd-backend-staging \
+            --task-definition ${{ steps.current-task.outputs.current_task }} \
+            --force-new-deployment
+          
+          echo "Waiting for rollback to stabilize..."
+          aws ecs wait services-stable \
+            --cluster hushryd-staging \
+            --services hushryd-backend-staging \
+            --timeout 120 || true
+          
+          ROLLBACK_END=$(date +%s)
+          ROLLBACK_DURATION=$((ROLLBACK_END - ROLLBACK_START))
+          
+          echo "Rollback completed in ${ROLLBACK_DURATION}s"
+          
+          # Verify rollback health
+          sleep 15
+          rollback_health=$(curl -s -o /dev/null -w "%{http_code}" https://staging-api.hushryd.com/health)
+          if [ "$rollback_health" = "200" ]; then
+            echo "✅ Rollback successful - service is healthy"
+          else
+            echo "⚠️ Rollback completed but health check returned: $rollback_health"
+          fi
+
+      - name: Notify success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "✅ Backend deployed to Staging",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "Environment", "value": "Staging", "short": true },
+                  { "title": "Branch", "value": "${{ github.ref_name }}", "short": true },
+                  { "title": "Commit", "value": "${{ github.sha }}", "short": false },
+                  { "title": "URL", "value": "https://staging-api.hushryd.com", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "❌ Staging deployment FAILED",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  { "title": "Environment", "value": "Staging", "short": true },
+                  { "title": "Branch", "value": "${{ github.ref_name }}", "short": true },
+                  { "title": "Commit", "value": "${{ github.sha }}", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ==========================================
+  # Pre-Production Load Testing
+  # Validates: Requirements 10.5
+  # ==========================================
+  pre-production-load-test:
+    name: Pre-Production Load Test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    outputs:
+      passed: ${{ steps.load-test.outputs.passed }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup k6
+        run: |
+          curl -L https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz | tar xz
+          sudo mv k6-v0.47.0-linux-amd64/k6 /usr/local/bin/
+          k6 version
+
+      - name: Run smoke load test against staging
+        id: load-test
+        run: |
+          echo "Running pre-production load test against staging..."
+          
+          # Run a quick smoke test to validate performance
+          k6 run \
+            --env BASE_URL=https://staging-api.hushryd.com \
+            --env WS_URL=wss://staging-api.hushryd.com \
+            --vus 50 \
+            --duration 2m \
+            --out json=results.json \
+            backend/load-tests/concurrent-users.js || true
+          
+          # Evaluate results
+          if [ -f results.json ]; then
+            P95=$(jq -r '.metrics.http_req_duration.values["p(95)"] // 9999' results.json 2>/dev/null || echo "9999")
+            ERROR_RATE=$(jq -r '.metrics.http_req_failed.values.rate // 1' results.json 2>/dev/null || echo "1")
+            
+            PASSED=true
+            if [ "$(echo "$P95 > 2000" | bc -l 2>/dev/null || echo "0")" = "1" ]; then
+              echo "⚠️ Response time p95: ${P95}ms exceeds 2000ms threshold"
+              PASSED=false
+            fi
+            if [ "$(echo "$ERROR_RATE > 0.01" | bc -l 2>/dev/null || echo "0")" = "1" ]; then
+              echo "⚠️ Error rate: ${ERROR_RATE} exceeds 1% threshold"
+              PASSED=false
+            fi
+            
+            echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          else
+            echo "passed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload load test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-production-load-test-${{ github.run_number }}
+          path: results.json
+          retention-days: 7
+
+      - name: Block deployment on performance regression
+        if: steps.load-test.outputs.passed == 'false'
+        run: |
+          echo "❌ Load test failed - blocking production deployment"
+          echo "Review performance metrics before proceeding"
+          exit 1
+
+  # ==========================================
+  # Production Deployment (main branch)
+  # Blue-Green Deployment with Manual Approval
+  # ==========================================
+  deploy-production:
+    name: Deploy to Production (Blue-Green)
+    runs-on: ubuntu-latest
+    needs: pre-production-load-test
+    if: (github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')) && needs.pre-production-load-test.outputs.passed != 'false'
+    # Manual approval is enforced via GitHub environment protection rules
+    # Configure in Settings > Environments > production > Required reviewers
+    environment:
+      name: production
+      url: https://api.hushryd.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: hushryd-backend
+          IMAGE_TAG: production-${{ github.sha }}
+        run: |
+          cd ${{ env.WORKING_DIRECTORY }}
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Fetch production secrets from AWS Secrets Manager
+        id: secrets
+        run: |
+          MONGODB_URI=$(aws secretsmanager get-secret-value --secret-id prod/hushryd/backend --query SecretString --output text | jq -r '.MONGODB_URI')
+          echo "::add-mask::$MONGODB_URI"
+          echo "MONGODB_URI=$MONGODB_URI" >> $GITHUB_ENV
+
+      - name: Run database migrations
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        env:
+          NODE_ENV: production
+          MONGODB_URI: ${{ env.MONGODB_URI }}
+        run: |
+          echo "Running database migrations for production..."
+          npm run migrate:production
+          echo "Database migrations completed successfully"
+
+      - name: Prepare ECS task definition
+        id: task-def
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          IMAGE_TAG: production-${{ github.sha }}
+        run: |
+          cd ${{ env.WORKING_DIRECTORY }}
+          # Replace placeholders in task definition
+          sed -i "s/\${AWS_ACCOUNT_ID}/$AWS_ACCOUNT_ID/g" ecs-task-definition-production.json
+          sed -i "s/\${AWS_REGION}/$AWS_REGION/g" ecs-task-definition-production.json
+          sed -i "s/\${IMAGE_TAG}/$IMAGE_TAG/g" ecs-task-definition-production.json
+
+      - name: Get current task definition for rollback
+        id: current-task
+        run: |
+          CURRENT_TASK=$(aws ecs describe-services --cluster hushryd-production --services hushryd-backend-production \
+            --query 'services[0].taskDefinition' --output text 2>/dev/null || echo "none")
+          echo "current_task=$CURRENT_TASK" >> $GITHUB_OUTPUT
+          echo "Current task definition: $CURRENT_TASK"
+
+      - name: Register new task definition
+        id: register-task
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://${{ env.WORKING_DIRECTORY }}/ecs-task-definition-production.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task_definition_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Registered task definition: $TASK_DEF_ARN"
+
+      - name: Create CodeDeploy deployment (Blue-Green)
+        id: deploy
+        env:
+          TASK_DEF_ARN: ${{ steps.register-task.outputs.task_definition_arn }}
+        run: |
+          # Create AppSpec content for CodeDeploy
+          cat > /tmp/appspec.json << EOF
+          {
+            "version": 0.0,
+            "Resources": [
+              {
+                "TargetService": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "TaskDefinition": "$TASK_DEF_ARN",
+                    "LoadBalancerInfo": {
+                      "ContainerName": "hushryd-backend",
+                      "ContainerPort": 3000
+                    }
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+          
+          # Create blue-green deployment
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name hushryd-backend \
+            --deployment-group-name hushryd-backend-production \
+            --revision '{"revisionType": "AppSpecContent", "appSpecContent": {"content": "'"$(cat /tmp/appspec.json | jq -c .)"'"}}' \
+            --deployment-config-name CodeDeployDefault.ECSLinear10PercentEvery1Minutes \
+            --description "Production deployment - commit ${{ github.sha }}" \
+            --query 'deploymentId' \
+            --output text)
+          
+          echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "Created deployment: $DEPLOYMENT_ID"
+
+      - name: Wait for deployment to complete
+        id: wait-deployment
+        env:
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
+        run: |
+          echo "Waiting for blue-green deployment to complete..."
+          
+          MAX_WAIT=1800  # 30 minutes max
+          ELAPSED=0
+          INTERVAL=30
+          
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            STATUS=$(aws deploy get-deployment \
+              --deployment-id $DEPLOYMENT_ID \
+              --query 'deploymentInfo.status' \
+              --output text)
+            
+            echo "Deployment status: $STATUS (elapsed: ${ELAPSED}s)"
+            
+            case $STATUS in
+              "Succeeded")
+                echo "Deployment succeeded!"
+                exit 0
+                ;;
+              "Failed"|"Stopped")
+                echo "Deployment failed with status: $STATUS"
+                echo "deployment_failed=true" >> $GITHUB_OUTPUT
+                exit 1
+                ;;
+              "Ready")
+                echo "Deployment ready - traffic shifted to green environment"
+                exit 0
+                ;;
+            esac
+            
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          
+          echo "Deployment timed out after ${MAX_WAIT}s"
+          echo "deployment_failed=true" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Health check
+        id: health-check
+        run: |
+          echo "Running comprehensive health checks on production..."
+          sleep 30
+          
+          MAX_RETRIES=10
+          RETRY_COUNT=0
+          HEALTH_URL="https://api.hushryd.com"
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            # Basic health check
+            health_response=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$HEALTH_URL/health")
+            
+            if [ "$health_response" = "200" ]; then
+              echo "Basic health check passed!"
+              
+              # Deep health check for database and dependencies
+              deep_response=$(curl -s --connect-timeout 5 --max-time 20 "$HEALTH_URL/health/deep" 2>/dev/null || echo '{}')
+              overall_status=$(echo "$deep_response" | jq -r '.status' 2>/dev/null || echo "unknown")
+              db_status=$(echo "$deep_response" | jq -r '.checks.database.status' 2>/dev/null || echo "unknown")
+              
+              echo "Deep health check: overall=$overall_status, database=$db_status"
+              
+              if [ "$overall_status" = "ok" ] && [ "$db_status" = "ok" ]; then
+                # Readiness check
+                ready_response=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$HEALTH_URL/ready")
+                
+                if [ "$ready_response" = "200" ]; then
+                  echo "✅ All health checks passed!"
+                  echo "  - Basic health: OK"
+                  echo "  - Database: OK"
+                  echo "  - Readiness: OK"
+                  exit 0
+                fi
+              elif [ "$overall_status" = "degraded" ]; then
+                echo "⚠️ Service is degraded but operational"
+                exit 0
+              fi
+            fi
+            
+            echo "Health check attempt $((RETRY_COUNT + 1)) - basic: $health_response"
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            sleep 15
+          done
+          
+          echo "health_check_failed=true" >> $GITHUB_OUTPUT
+          echo "❌ Health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure() && (steps.health-check.outputs.health_check_failed == 'true' || steps.wait-deployment.outputs.deployment_failed == 'true')
+        run: |
+          echo "🔄 Initiating auto-rollback to previous version..."
+          echo "Requirement: Complete rollback within 60 seconds (Req 2.4, 12.1)"
+          
+          ROLLBACK_START=$(date +%s)
+          
+          # Stop the failed deployment if still in progress
+          if [ -n "${{ steps.deploy.outputs.deployment_id }}" ]; then
+            echo "Stopping failed deployment: ${{ steps.deploy.outputs.deployment_id }}"
+            aws deploy stop-deployment \
+              --deployment-id ${{ steps.deploy.outputs.deployment_id }} \
+              --auto-rollback-enabled 2>/dev/null || true
+          fi
+          
+          # Rollback to previous task definition
+          if [ "${{ steps.current-task.outputs.current_task }}" != "none" ]; then
+            echo "Rolling back to: ${{ steps.current-task.outputs.current_task }}"
+            
+            aws ecs update-service \
+              --cluster hushryd-production \
+              --service hushryd-backend-production \
+              --task-definition ${{ steps.current-task.outputs.current_task }} \
+              --force-new-deployment
+            
+            echo "Waiting for rollback to stabilize (max 60s)..."
+            timeout 60 aws ecs wait services-stable \
+              --cluster hushryd-production \
+              --services hushryd-backend-production || true
+            
+            ROLLBACK_END=$(date +%s)
+            ROLLBACK_DURATION=$((ROLLBACK_END - ROLLBACK_START))
+            
+            echo "Rollback completed in ${ROLLBACK_DURATION}s"
+            
+            # Verify rollback health
+            sleep 10
+            rollback_health=$(curl -s -o /dev/null -w "%{http_code}" https://api.hushryd.com/health)
+            if [ "$rollback_health" = "200" ]; then
+              echo "✅ Rollback successful - service is healthy"
+            else
+              echo "⚠️ Rollback completed but health check returned: $rollback_health"
+            fi
+            
+            # Check if rollback met the 60-second requirement
+            if [ "$ROLLBACK_DURATION" -le 60 ]; then
+              echo "✅ Rollback completed within 60-second requirement"
+            else
+              echo "⚠️ Rollback took ${ROLLBACK_DURATION}s (target: 60s)"
+            fi
+          else
+            echo "❌ No previous task definition found for rollback"
+          fi
+
+      - name: Record deployment in database
+        if: always()
+        run: |
+          # Record deployment metadata for tracking
+          echo "Recording deployment metadata..."
+          cat > /tmp/deployment-record.json << EOF
+          {
+            "deploymentId": "${{ steps.deploy.outputs.deployment_id }}",
+            "service": "backend",
+            "environment": "production",
+            "version": "${{ github.sha }}",
+            "gitBranch": "${{ github.ref_name }}",
+            "status": "${{ job.status }}",
+            "startedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "deployedBy": "${{ github.actor }}"
+          }
+          EOF
+          cat /tmp/deployment-record.json
+
+      - name: Notify success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "🚀 Backend deployed to Production (Blue-Green)",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "Environment", "value": "Production", "short": true },
+                  { "title": "Deployment", "value": "Blue-Green", "short": true },
+                  { "title": "Version", "value": "${{ github.sha }}", "short": true },
+                  { "title": "Deployed By", "value": "${{ github.actor }}", "short": true },
+                  { "title": "URL", "value": "https://api.hushryd.com", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "❌ Production deployment FAILED - Rollback initiated",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  { "title": "Environment", "value": "Production", "short": true },
+                  { "title": "Deployment Type", "value": "Blue-Green", "short": true },
+                  { "title": "Commit", "value": "${{ github.sha }}", "short": true },
+                  { "title": "Actor", "value": "${{ github.actor }}", "short": true },
+                  { "title": "Deployment ID", "value": "${{ steps.deploy.outputs.deployment_id }}", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

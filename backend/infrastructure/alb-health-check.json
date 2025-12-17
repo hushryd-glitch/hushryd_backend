@@ -1,0 +1,132 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "ALB Target Group with Health Check Configuration for HushRyd Backend",
+  "Parameters": {
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+      "Description": "VPC ID for the target group"
+    },
+    "Environment": {
+      "Type": "String",
+      "AllowedValues": ["staging", "production"],
+      "Description": "Deployment environment"
+    }
+  },
+  "Resources": {
+    "BackendTargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "hushryd-backend-${Environment}"
+        },
+        "Port": 3000,
+        "Protocol": "HTTP",
+        "VpcId": { "Ref": "VpcId" },
+        "TargetType": "ip",
+        "HealthCheckEnabled": true,
+        "HealthCheckIntervalSeconds": 30,
+        "HealthCheckPath": "/health",
+        "HealthCheckPort": "traffic-port",
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": 2,
+        "UnhealthyThresholdCount": 3,
+        "Matcher": {
+          "HttpCode": "200"
+        },
+        "TargetGroupAttributes": [
+          {
+            "Key": "deregistration_delay.timeout_seconds",
+            "Value": "30"
+          },
+          {
+            "Key": "slow_start.duration_seconds",
+            "Value": "60"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" }
+          },
+          {
+            "Key": "Service",
+            "Value": "hushryd-backend"
+          }
+        ]
+      }
+    },
+    "BackendTargetGroupBlue": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Condition": "IsProduction",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "hushryd-backend-${Environment}-blue"
+        },
+        "Port": 3000,
+        "Protocol": "HTTP",
+        "VpcId": { "Ref": "VpcId" },
+        "TargetType": "ip",
+        "HealthCheckEnabled": true,
+        "HealthCheckIntervalSeconds": 30,
+        "HealthCheckPath": "/health",
+        "HealthCheckPort": "traffic-port",
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": 2,
+        "UnhealthyThresholdCount": 3,
+        "Matcher": {
+          "HttpCode": "200"
+        }
+      }
+    },
+    "BackendTargetGroupGreen": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Condition": "IsProduction",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "hushryd-backend-${Environment}-green"
+        },
+        "Port": 3000,
+        "Protocol": "HTTP",
+        "VpcId": { "Ref": "VpcId" },
+        "TargetType": "ip",
+        "HealthCheckEnabled": true,
+        "HealthCheckIntervalSeconds": 30,
+        "HealthCheckPath": "/health",
+        "HealthCheckPort": "traffic-port",
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": 2,
+        "UnhealthyThresholdCount": 3,
+        "Matcher": {
+          "HttpCode": "200"
+        }
+      }
+    }
+  },
+  "Conditions": {
+    "IsProduction": {
+      "Fn::Equals": [{ "Ref": "Environment" }, "production"]
+    }
+  },
+  "Outputs": {
+    "TargetGroupArn": {
+      "Description": "ARN of the main target group",
+      "Value": { "Ref": "BackendTargetGroup" },
+      "Export": {
+        "Name": { "Fn::Sub": "hushryd-backend-${Environment}-tg-arn" }
+      }
+    },
+    "BlueTargetGroupArn": {
+      "Condition": "IsProduction",
+      "Description": "ARN of the blue target group",
+      "Value": { "Ref": "BackendTargetGroupBlue" }
+    },
+    "GreenTargetGroupArn": {
+      "Condition": "IsProduction",
+      "Description": "ARN of the green target group",
+      "Value": { "Ref": "BackendTargetGroupGreen" }
+    }
+  }
+}

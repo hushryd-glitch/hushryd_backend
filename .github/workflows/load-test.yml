@@ -1,0 +1,303 @@
+name: Load Testing
+
+on:
+  # Run before production deployment
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Target environment for load testing'
+        required: true
+        type: string
+        default: 'staging'
+      test_type:
+        description: 'Type of load test to run'
+        required: false
+        type: string
+        default: 'smoke'
+    outputs:
+      passed:
+        description: 'Whether load tests passed'
+        value: ${{ jobs.load-test.outputs.passed }}
+      report_url:
+        description: 'URL to performance report'
+        value: ${{ jobs.load-test.outputs.report_url }}
+  
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      test_type:
+        description: 'Test type'
+        required: true
+        default: 'smoke'
+        type: choice
+        options:
+          - smoke
+          - load
+          - stress
+          - full
+      vus:
+        description: 'Number of virtual users (override)'
+        required: false
+        type: number
+      duration:
+        description: 'Test duration (e.g., 5m, 30m)'
+        required: false
+        type: string
+
+env:
+  K6_VERSION: '0.47.0'
+  WORKING_DIRECTORY: backend/load-tests
+
+jobs:
+  load-test:
+    name: Run Load Tests
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.evaluate.outputs.passed }}
+      report_url: ${{ steps.upload-report.outputs.artifact-url }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup k6
+        run: |
+          curl -L https://github.com/grafana/k6/releases/download/v${{ env.K6_VERSION }}/k6-v${{ env.K6_VERSION }}-linux-amd64.tar.gz | tar xz
+          sudo mv k6-v${{ env.K6_VERSION }}-linux-amd64/k6 /usr/local/bin/
+          k6 version
+
+      - name: Set environment URLs
+        id: set-urls
+        run: |
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            echo "BASE_URL=https://api.hushryd.com" >> $GITHUB_ENV
+            echo "WS_URL=wss://api.hushryd.com" >> $GITHUB_ENV
+          else
+            echo "BASE_URL=https://staging-api.hushryd.com" >> $GITHUB_ENV
+            echo "WS_URL=wss://staging-api.hushryd.com" >> $GITHUB_ENV
+          fi
+
+      - name: Verify target is reachable
+        run: |
+          echo "Checking ${{ env.BASE_URL }}/api/health..."
+          response=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "${{ env.BASE_URL }}/api/health" || echo "000")
+          if [ "$response" != "200" ]; then
+            echo "Target environment is not reachable (status: $response)"
+            exit 1
+          fi
+          echo "Target environment is healthy"
+
+      - name: Run smoke test
+        if: inputs.test_type == 'smoke'
+        id: smoke-test
+        run: |
+          echo "Running smoke test (quick validation)..."
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env WS_URL=${{ env.WS_URL }} \
+            --vus 10 \
+            --duration 1m \
+            --out json=results-smoke.json \
+            ${{ env.WORKING_DIRECTORY }}/concurrent-users.js
+        continue-on-error: true
+
+      - name: Run load test
+        if: inputs.test_type == 'load'
+        id: load-test
+        run: |
+          echo "Running load test (standard load)..."
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env WS_URL=${{ env.WS_URL }} \
+            ${{ inputs.vus && format('--vus {0}', inputs.vus) || '' }} \
+            ${{ inputs.duration && format('--duration {0}', inputs.duration) || '' }} \
+            --out json=results-load.json \
+            ${{ env.WORKING_DIRECTORY }}/concurrent-users.js
+        continue-on-error: true
+
+      - name: Run stress test
+        if: inputs.test_type == 'stress'
+        id: stress-test
+        run: |
+          echo "Running stress test (high load)..."
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env WS_URL=${{ env.WS_URL }} \
+            --out json=results-stress.json \
+            ${{ env.WORKING_DIRECTORY }}/full-load-test.js
+        continue-on-error: true
+
+      - name: Run full load test
+        if: inputs.test_type == 'full'
+        id: full-test
+        run: |
+          echo "Running full load test (all scenarios)..."
+          k6 run \
+            --env BASE_URL=${{ env.BASE_URL }} \
+            --env WS_URL=${{ env.WS_URL }} \
+            --out json=results-full.json \
+            ${{ env.WORKING_DIRECTORY }}/full-load-test.js
+        continue-on-error: true
+
+      - name: Generate performance report
+        id: generate-report
+        run: |
+          # Find the results file
+          RESULTS_FILE=$(ls results-*.json 2>/dev/null | head -1)
+          
+          if [ -z "$RESULTS_FILE" ]; then
+            echo "No results file found"
+            exit 1
+          fi
+          
+          echo "Processing results from $RESULTS_FILE..."
+          
+          # Extract key metrics using jq
+          cat > report.txt << 'EOF'
+          ═══════════════════════════════════════════════════════════════
+                    HUSHRYD LOAD TEST PERFORMANCE REPORT
+          ═══════════════════════════════════════════════════════════════
+          EOF
+          
+          echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> report.txt
+          echo "Environment: ${{ inputs.environment }}" >> report.txt
+          echo "Test Type: ${{ inputs.test_type }}" >> report.txt
+          echo "" >> report.txt
+          
+          # Parse k6 summary from JSON
+          if command -v jq &> /dev/null; then
+            echo "METRICS SUMMARY" >> report.txt
+            echo "───────────────────────────────────────" >> report.txt
+            
+            # Extract metrics if available
+            HTTP_REQS=$(jq -r '.metrics.http_reqs.values.count // "N/A"' "$RESULTS_FILE" 2>/dev/null || echo "N/A")
+            HTTP_DURATION_P95=$(jq -r '.metrics.http_req_duration.values["p(95)"] // "N/A"' "$RESULTS_FILE" 2>/dev/null || echo "N/A")
+            HTTP_FAILED=$(jq -r '.metrics.http_req_failed.values.rate // "N/A"' "$RESULTS_FILE" 2>/dev/null || echo "N/A")
+            
+            echo "Total Requests: $HTTP_REQS" >> report.txt
+            echo "Response Time (p95): ${HTTP_DURATION_P95}ms" >> report.txt
+            echo "Error Rate: $HTTP_FAILED" >> report.txt
+          fi
+          
+          echo "" >> report.txt
+          echo "═══════════════════════════════════════════════════════════════" >> report.txt
+          
+          cat report.txt
+          
+          # Save report path
+          echo "report_path=report.txt" >> $GITHUB_OUTPUT
+
+      - name: Evaluate SLA compliance
+        id: evaluate
+        run: |
+          RESULTS_FILE=$(ls results-*.json 2>/dev/null | head -1)
+          
+          if [ -z "$RESULTS_FILE" ]; then
+            echo "passed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check SLA thresholds
+          PASSED=true
+          
+          # Check response time (p95 < 2000ms)
+          P95=$(jq -r '.metrics.http_req_duration.values["p(95)"] // 0' "$RESULTS_FILE" 2>/dev/null || echo "0")
+          if [ "$(echo "$P95 > 2000" | bc -l 2>/dev/null || echo "0")" = "1" ]; then
+            echo "❌ Response time SLA breached: ${P95}ms > 2000ms"
+            PASSED=false
+          else
+            echo "✓ Response time SLA met: ${P95}ms"
+          fi
+          
+          # Check error rate (< 1%)
+          ERROR_RATE=$(jq -r '.metrics.http_req_failed.values.rate // 0' "$RESULTS_FILE" 2>/dev/null || echo "0")
+          if [ "$(echo "$ERROR_RATE > 0.01" | bc -l 2>/dev/null || echo "0")" = "1" ]; then
+            echo "❌ Error rate SLA breached: ${ERROR_RATE} > 0.01"
+            PASSED=false
+          else
+            echo "✓ Error rate SLA met: ${ERROR_RATE}"
+          fi
+          
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          
+          if [ "$PASSED" = "false" ]; then
+            echo "::warning::Load test SLA thresholds breached"
+          fi
+
+      - name: Upload test results
+        id: upload-report
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results-${{ inputs.environment }}-${{ github.run_number }}
+          path: |
+            results-*.json
+            report.txt
+          retention-days: 30
+
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const passed = '${{ steps.evaluate.outputs.passed }}' === 'true';
+            const status = passed ? '✅ PASSED' : '❌ FAILED';
+            
+            const body = `## Load Test Results ${status}
+            
+            **Environment:** ${{ inputs.environment }}
+            **Test Type:** ${{ inputs.test_type }}
+            
+            [View Full Report](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            
+            ${passed ? 'All SLA thresholds met.' : '⚠️ SLA thresholds breached. Review before deploying to production.'}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+      - name: Fail if SLA breached (production gate)
+        if: inputs.environment == 'production' && steps.evaluate.outputs.passed == 'false'
+        run: |
+          echo "❌ Load test failed SLA requirements"
+          echo "Deployment to production is blocked"
+          exit 1
+
+  # Notify on completion
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: load-test
+    if: always()
+    
+    steps:
+      - name: Send Slack notification
+        if: vars.SLACK_WEBHOOK_URL != ''
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "${{ needs.load-test.outputs.passed == 'true' && '✅' || '❌' }} Load Test ${{ needs.load-test.outputs.passed == 'true' && 'Passed' || 'Failed' }}",
+              "attachments": [{
+                "color": "${{ needs.load-test.outputs.passed == 'true' && 'good' || 'danger' }}",
+                "fields": [
+                  { "title": "Environment", "value": "${{ inputs.environment }}", "short": true },
+                  { "title": "Test Type", "value": "${{ inputs.test_type }}", "short": true },
+                  { "title": "Status", "value": "${{ needs.load-test.outputs.passed == 'true' && 'All SLAs Met' || 'SLA Breached' }}", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

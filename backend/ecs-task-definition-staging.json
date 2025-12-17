@@ -1,0 +1,98 @@
+{
+  "family": "hushryd-backend-staging",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/hushryd-backend-task-role",
+  "containerDefinitions": [
+    {
+      "name": "hushryd-backend",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/hushryd-backend:staging-${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value": "staging"
+        },
+        {
+          "name": "PORT",
+          "value": "3000"
+        },
+        {
+          "name": "APP_VERSION",
+          "value": "${IMAGE_TAG}"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "MONGODB_URI",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:staging/hushryd/backend:MONGODB_URI::"
+        },
+        {
+          "name": "JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:staging/hushryd/backend:JWT_SECRET::"
+        },
+        {
+          "name": "TWILIO_ACCOUNT_SID",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:staging/hushryd/backend:TWILIO_ACCOUNT_SID::"
+        },
+        {
+          "name": "TWILIO_AUTH_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:staging/hushryd/backend:TWILIO_AUTH_TOKEN::"
+        },
+        {
+          "name": "SENDGRID_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:staging/hushryd/backend:SENDGRID_API_KEY::"
+        },
+        {
+          "name": "AWS_S3_BUCKET",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:staging/hushryd/backend:AWS_S3_BUCKET::"
+        },
+        {
+          "name": "ENCRYPTION_KEY",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:staging/hushryd/backend:ENCRYPTION_KEY::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/hushryd-backend-staging",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 45
+      },
+      "stopTimeout": 30,
+      "startTimeout": 120
+    }
+  ],
+  "tags": [
+    {
+      "key": "Environment",
+      "value": "staging"
+    },
+    {
+      "key": "Service",
+      "value": "hushryd-backend"
+    },
+    {
+      "key": "ManagedBy",
+      "value": "github-actions"
+    }
+  ]
+}

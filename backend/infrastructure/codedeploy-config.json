@@ -1,0 +1,277 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "CodeDeploy Configuration for HushRyd Backend with Auto-Rollback",
+  "Parameters": {
+    "Environment": {
+      "Type": "String",
+      "AllowedValues": ["staging", "production"],
+      "Description": "Deployment environment"
+    },
+    "ECSClusterName": {
+      "Type": "String",
+      "Description": "Name of the ECS cluster"
+    },
+    "ECSServiceName": {
+      "Type": "String",
+      "Description": "Name of the ECS service"
+    },
+    "ProductionListenerArn": {
+      "Type": "String",
+      "Description": "ARN of the production ALB listener"
+    },
+    "TestListenerArn": {
+      "Type": "String",
+      "Description": "ARN of the test ALB listener"
+    },
+    "BlueTargetGroupName": {
+      "Type": "String",
+      "Description": "Name of the blue target group"
+    },
+    "GreenTargetGroupName": {
+      "Type": "String",
+      "Description": "Name of the green target group"
+    }
+  },
+  "Resources": {
+    "CodeDeployApplication": {
+      "Type": "AWS::CodeDeploy::Application",
+      "Properties": {
+        "ApplicationName": {
+          "Fn::Sub": "hushryd-backend-${Environment}"
+        },
+        "ComputePlatform": "ECS",
+        "Tags": [
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" }
+          },
+          {
+            "Key": "Service",
+            "Value": "hushryd-backend"
+          }
+        ]
+      }
+    },
+    "CodeDeployDeploymentGroup": {
+      "Type": "AWS::CodeDeploy::DeploymentGroup",
+      "Properties": {
+        "ApplicationName": { "Ref": "CodeDeployApplication" },
+        "DeploymentGroupName": {
+          "Fn::Sub": "hushryd-backend-${Environment}"
+        },
+        "ServiceRoleArn": { "Fn::GetAtt": ["CodeDeployServiceRole", "Arn"] },
+        "DeploymentConfigName": {
+          "Fn::If": [
+            "IsProduction",
+            "CodeDeployDefault.ECSLinear10PercentEvery1Minutes",
+            "CodeDeployDefault.ECSAllAtOnce"
+          ]
+        },
+        "AutoRollbackConfiguration": {
+          "Enabled": true,
+          "Events": [
+            "DEPLOYMENT_FAILURE",
+            "DEPLOYMENT_STOP_ON_ALARM",
+            "DEPLOYMENT_STOP_ON_REQUEST"
+          ]
+        },
+        "BlueGreenDeploymentConfiguration": {
+          "DeploymentReadyOption": {
+            "ActionOnTimeout": "CONTINUE_DEPLOYMENT",
+            "WaitTimeInMinutes": 0
+          },
+          "TerminateBlueInstancesOnDeploymentSuccess": {
+            "Action": "TERMINATE",
+            "TerminationWaitTimeInMinutes": 5
+          }
+        },
+        "DeploymentStyle": {
+          "DeploymentOption": "WITH_TRAFFIC_CONTROL",
+          "DeploymentType": "BLUE_GREEN"
+        },
+        "ECSServices": [
+          {
+            "ClusterName": { "Ref": "ECSClusterName" },
+            "ServiceName": { "Ref": "ECSServiceName" }
+          }
+        ],
+        "LoadBalancerInfo": {
+          "TargetGroupPairInfoList": [
+            {
+              "ProdTrafficRoute": {
+                "ListenerArns": [{ "Ref": "ProductionListenerArn" }]
+              },
+              "TestTrafficRoute": {
+                "ListenerArns": [{ "Ref": "TestListenerArn" }]
+              },
+              "TargetGroups": [
+                { "Name": { "Ref": "BlueTargetGroupName" } },
+                { "Name": { "Ref": "GreenTargetGroupName" } }
+              ]
+            }
+          ]
+        },
+        "AlarmConfiguration": {
+          "Enabled": true,
+          "Alarms": [
+            { "Name": { "Fn::Sub": "hushryd-backend-${Environment}-error-rate" } },
+            { "Name": { "Fn::Sub": "hushryd-backend-${Environment}-latency" } },
+            { "Name": { "Fn::Sub": "hushryd-backend-${Environment}-health-check" } }
+          ],
+          "IgnorePollAlarmFailure": false
+        },
+        "Tags": [
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" }
+          }
+        ]
+      }
+    },
+    "CodeDeployServiceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "hushryd-codedeploy-${Environment}-role"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codedeploy.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "CodeDeployECSPolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:DescribeServices",
+                    "ecs:CreateTaskSet",
+                    "ecs:UpdateServicePrimaryTaskSet",
+                    "ecs:DeleteTaskSet",
+                    "elasticloadbalancing:DescribeTargetGroups",
+                    "elasticloadbalancing:DescribeListeners",
+                    "elasticloadbalancing:ModifyListener",
+                    "elasticloadbalancing:DescribeRules",
+                    "elasticloadbalancing:ModifyRule",
+                    "lambda:InvokeFunction",
+                    "cloudwatch:DescribeAlarms",
+                    "sns:Publish",
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "HealthCheckAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "hushryd-backend-${Environment}-health-check"
+        },
+        "AlarmDescription": "Alarm when health check fails - triggers auto-rollback",
+        "MetricName": "UnHealthyHostCount",
+        "Namespace": "AWS/ApplicationELB",
+        "Statistic": "Average",
+        "Period": 60,
+        "EvaluationPeriods": 2,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "TargetGroup",
+            "Value": { "Ref": "BlueTargetGroupName" }
+          },
+          {
+            "Name": "LoadBalancer",
+            "Value": { "Fn::Sub": "app/hushryd-${Environment}-alb" }
+          }
+        ],
+        "TreatMissingData": "breaching"
+      }
+    },
+    "ErrorRateAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "hushryd-backend-${Environment}-error-rate"
+        },
+        "AlarmDescription": "Alarm when 5xx error rate exceeds threshold",
+        "MetricName": "HTTPCode_Target_5XX_Count",
+        "Namespace": "AWS/ApplicationELB",
+        "Statistic": "Sum",
+        "Period": 60,
+        "EvaluationPeriods": 2,
+        "Threshold": 10,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Dimensions": [
+          {
+            "Name": "TargetGroup",
+            "Value": { "Ref": "BlueTargetGroupName" }
+          }
+        ],
+        "TreatMissingData": "notBreaching"
+      }
+    },
+    "LatencyAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": {
+          "Fn::Sub": "hushryd-backend-${Environment}-latency"
+        },
+        "AlarmDescription": "Alarm when latency exceeds threshold",
+        "MetricName": "TargetResponseTime",
+        "Namespace": "AWS/ApplicationELB",
+        "Statistic": "Average",
+        "Period": 60,
+        "EvaluationPeriods": 3,
+        "Threshold": 2,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Dimensions": [
+          {
+            "Name": "TargetGroup",
+            "Value": { "Ref": "BlueTargetGroupName" }
+          }
+        ],
+        "TreatMissingData": "notBreaching"
+      }
+    }
+  },
+  "Conditions": {
+    "IsProduction": {
+      "Fn::Equals": [{ "Ref": "Environment" }, "production"]
+    }
+  },
+  "Outputs": {
+    "CodeDeployApplicationName": {
+      "Description": "CodeDeploy Application Name",
+      "Value": { "Ref": "CodeDeployApplication" }
+    },
+    "CodeDeployDeploymentGroupName": {
+      "Description": "CodeDeploy Deployment Group Name",
+      "Value": { "Ref": "CodeDeployDeploymentGroup" }
+    },
+    "CodeDeployServiceRoleArn": {
+      "Description": "CodeDeploy Service Role ARN",
+      "Value": { "Fn::GetAtt": ["CodeDeployServiceRole", "Arn"] }
+    }
+  }
+}

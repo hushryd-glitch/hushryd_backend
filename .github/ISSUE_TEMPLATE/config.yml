@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: HushRyd Documentation
+    url: https://docs.hushryd.com
+    about: Check our documentation for answers to common questions
+  - name: Security Issues
+    url: mailto:security@hushryd.com
+    about: Report security vulnerabilities privately via email

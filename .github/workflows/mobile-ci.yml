@@ -1,0 +1,291 @@
+name: Mobile CI/CD
+
+on:
+  push:
+    branches: [develop, staging, main]
+    paths:
+      - 'mobile-app/**'
+      - '.github/workflows/mobile-ci.yml'
+  pull_request:
+    branches: [develop, staging, main]
+    paths:
+      - 'mobile-app/**'
+      - '.github/workflows/mobile-ci.yml'
+
+env:
+  NODE_VERSION: '18'
+  WORKING_DIRECTORY: mobile-app
+
+jobs:
+  # ==========================================
+  # Lint and Test
+  # ==========================================
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Run linting
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm run lint --if-present
+
+      - name: Run tests
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm test -- --passWithNoTests
+        env:
+          CI: true
+
+  # ==========================================
+  # Development Build (develop branch)
+  # ==========================================
+  build-development:
+    name: Build Development
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Build Development (Android)
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: eas build --platform android --profile development --non-interactive
+
+      - name: Build Development (iOS)
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: eas build --platform ios --profile development --non-interactive
+
+      - name: Notify build complete
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "📱 Mobile Development builds complete!",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "Profile", "value": "Development", "short": true },
+                  { "title": "Branch", "value": "${{ github.ref_name }}", "short": true }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ==========================================
+  # Preview Build (staging branch)
+  # ==========================================
+  build-preview:
+    name: Build Preview & Submit to TestFlight/Internal
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/staging' && github.event_name == 'push'
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Build and Submit Preview (Android)
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: eas build --platform android --profile preview --auto-submit --non-interactive
+
+      - name: Build and Submit Preview (iOS)
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: eas build --platform ios --profile preview --auto-submit --non-interactive
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          ASC_APP_ID: ${{ secrets.ASC_APP_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Notify build complete
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "📱 Mobile Preview builds submitted to TestFlight/Play Console Internal!",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "Profile", "value": "Preview (Staging)", "short": true },
+                  { "title": "Branch", "value": "${{ github.ref_name }}", "short": true }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ==========================================
+  # Production Build (main branch)
+  # ==========================================
+  build-production:
+    name: Build Production & Submit to Stores
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Build and Submit Production (Android)
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: eas build --platform android --profile production --auto-submit --non-interactive
+
+      - name: Build and Submit Production (iOS)
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: eas build --platform ios --profile production --auto-submit --non-interactive
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          ASC_APP_ID: ${{ secrets.ASC_APP_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Notify build complete
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "🚀 Mobile Production builds submitted to App Store & Play Store!",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "Profile", "value": "Production", "short": true },
+                  { "title": "Commit", "value": "${{ github.sha }}", "short": true }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ==========================================
+  # OTA Update (for JS-only changes)
+  # ==========================================
+  ota-update:
+    name: Publish OTA Update
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[native]')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/package-lock.json
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: npm ci
+
+      - name: Determine channel
+        id: channel
+        run: |
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "channel=production" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/staging" ]; then
+            echo "channel=preview" >> $GITHUB_OUTPUT
+          else
+            echo "channel=development" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish OTA Update
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: eas update --channel ${{ steps.channel.outputs.channel }} --message "${{ github.event.head_commit.message }}" --non-interactive
+
+      - name: Notify OTA update
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "📲 OTA Update published to ${{ steps.channel.outputs.channel }}",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "Channel", "value": "${{ steps.channel.outputs.channel }}", "short": true },
+                  { "title": "Message", "value": "${{ github.event.head_commit.message }}", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

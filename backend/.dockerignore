@@ -1,0 +1,49 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Environment files (secrets should be injected at runtime)
+.env
+.env.*
+!.env.example
+
+# Test files
+tests/
+coverage/
+*.test.js
+jest.config.js
+
+# Development files
+.git
+.gitignore
+.vscode
+*.md
+!README.md
+
+# Build artifacts
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Scripts (not needed in production)
+scripts/
+
+# Uploads (mounted as volume in production)
+uploads/
+
+# Docker files (prevent recursive copy)
+Dockerfile
+docker-compose*.yml
+.dockerignore
