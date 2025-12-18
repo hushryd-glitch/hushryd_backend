@@ -4,13 +4,16 @@
  * Rationale: Follows 12-factor app principles, enables secure key management and rotation without code changes
  */
 
-// Required in production, optional in development (will use mock values)
+// Core production requirements (auth must work)
 const productionRequiredEnvVars = [
-  // SMS Provider (Twilio)
+  // SMS Provider (Twilio) - Required for OTP
   'TWILIO_ACCOUNT_SID',
   'TWILIO_AUTH_TOKEN',
-  'TWILIO_PHONE_NUMBER',
-  
+  'TWILIO_PHONE_NUMBER'
+];
+
+// Optional services - app will work without these (features disabled)
+const optionalServiceEnvVars = [
   // Email Provider (SendGrid)
   'SENDGRID_API_KEY',
   'SENDGRID_FROM_EMAIL',
@@ -84,9 +87,15 @@ const validateEnvironment = () => {
     if (missingProd.length > 0) {
       throw new Error(`Missing required environment variables for production: ${missingProd.join(', ')}`);
     }
+    
+    // Warn about optional services that are not configured
+    const missingOptional = optionalServiceEnvVars.filter(key => !process.env[key]);
+    if (missingOptional.length > 0) {
+      console.warn(`⚠ Optional services not configured (features will be disabled): ${missingOptional.join(', ')}`);
+    }
   } else {
     // In development, warn about missing external service keys but don't fail
-    const missingExternal = productionRequiredEnvVars.filter(key => 
+    const missingExternal = [...productionRequiredEnvVars, ...optionalServiceEnvVars].filter(key => 
       !process.env[key] || process.env[key].startsWith('your-')
     );
     if (missingExternal.length > 0) {
