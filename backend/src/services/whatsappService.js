@@ -5,10 +5,18 @@
  * 
  * Requirements: 3.3
  * Requirements: 8.2 - Circuit breaker protection for external service calls
+ * 
+ * NOTE: When WHATSAPP_ENABLED=false, this service operates in stub mode
+ * and logs messages instead of sending them.
  */
 
 const https = require('https');
 const { getCircuitBreaker, CircuitBreakers } = require('./circuitBreakerService');
+
+// Check if WhatsApp is enabled
+const WHATSAPP_ENABLED = process.env.WHATSAPP_ENABLED !== 'false' && 
+  process.env.WHATSAPP_API_KEY && 
+  process.env.WHATSAPP_PHONE_NUMBER_ID;
 
 /**
  * WhatsAppService class for sending WhatsApp messages
@@ -18,8 +26,11 @@ class WhatsAppService {
     this.apiKey = config.apiKey || process.env.WHATSAPP_API_KEY;
     this.phoneNumberId = config.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
     this.apiVersion = config.apiVersion || 'v18.0';
+    this.enabled = WHATSAPP_ENABLED;
     
-    if (!this.apiKey || !this.phoneNumberId) {
+    if (!this.enabled) {
+      console.log('[WhatsAppService] Running in STUB mode - messages will be logged but not sent');
+    } else if (!this.apiKey || !this.phoneNumberId) {
       console.warn('WhatsAppService: Missing configuration. WhatsApp sending will fail.');
     }
   }
@@ -33,6 +44,28 @@ class WhatsAppService {
    * @returns {Promise<Object>} Send result with messageId
    */
   async send(recipient, content, attachments = []) {
+    // Stub mode - log and return success
+    if (!this.enabled) {
+      const formattedRecipient = this.formatPhoneNumber(recipient);
+      console.log('\n╔══════════════════════════════════════════════════════════════╗');
+      console.log('║              📱 WHATSAPP MESSAGE (STUB MODE)                  ║');
+      console.log('╠══════════════════════════════════════════════════════════════╣');
+      console.log(`║  To: ${formattedRecipient.padEnd(54)}║`);
+      console.log(`║  Message: ${(content.body || '').substring(0, 48).padEnd(48)}║`);
+      if (attachments.length > 0) {
+        console.log(`║  Attachments: ${attachments.length} file(s)${' '.repeat(41)}║`);
+      }
+      console.log('╚══════════════════════════════════════════════════════════════╝\n');
+      
+      return {
+        success: true,
+        messageId: `stub_wa_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        status: 'stub_sent',
+        to: formattedRecipient,
+        stubMode: true
+      };
+    }
+    
     const circuitBreaker = getCircuitBreaker(CircuitBreakers.WHATSAPP, {
       failureThreshold: 50,
       resetTimeout: 30000

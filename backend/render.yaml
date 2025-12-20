@@ -6,6 +6,7 @@ services:
     name: hushryd-api
     runtime: node
     plan: free
+    rootDir: backend
     buildCommand: npm install
     startCommand: npm start
     envVars:
@@ -14,7 +15,7 @@ services:
       - key: PORT
         value: 10000
       - key: ENABLE_DEMO_OTP
-        value: "false"
+        value: "true"
       - key: MONGODB_URI
         sync: false
       - key: JWT_SECRET
@@ -22,13 +23,15 @@ services:
       - key: ENCRYPTION_SECRET
         generateValue: true
       - key: CORS_ORIGIN
-        sync: false
+        value: "*"
+      # Twilio SMS (optional - set to enable real SMS)
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
         sync: false
       - key: TWILIO_PHONE_NUMBER
         sync: false
+      # AWS S3 (optional - for document uploads)
       - key: AWS_S3_BUCKET
         sync: false
       - key: AWS_REGION
@@ -37,4 +40,12 @@ services:
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
         sync: false
+      # Payment Gateway - DISABLED (stub mode)
+      - key: CASHFREE_ENABLED
+        value: "false"
+      - key: RAZORPAY_ENABLED
+        value: "false"
+      # WhatsApp - DISABLED (stub mode)
+      - key: WHATSAPP_ENABLED
+        value: "false"
     healthCheckPath: /health

@@ -2,6 +2,8 @@
  * Cashfree Payment Gateway Configuration
  * Supports sandbox/production toggle via environment variables
  * Requirements: 12.1, 12.3
+ * 
+ * NOTE: When CASHFREE_ENABLED=false, the payment service operates in stub mode
  */
 
 const CASHFREE_ENVIRONMENTS = {
@@ -14,6 +16,9 @@ const CASHFREE_ENVIRONMENTS = {
     name: 'production'
   }
 };
+
+// Check if Cashfree is explicitly enabled
+const CASHFREE_ENABLED = process.env.CASHFREE_ENABLED !== 'false';
 
 /**
  * Get Cashfree configuration from environment
@@ -34,6 +39,7 @@ const getCashfreeConfig = () => {
     environment: envConfig.name,
     baseUrl: envConfig.baseUrl,
     webhookSecret: process.env.CASHFREE_WEBHOOK_SECRET,
+    enabled: CASHFREE_ENABLED,
     
     // Platform fee configuration
     platformFee: 10, // Fixed ₹10 platform fee
@@ -60,6 +66,12 @@ const getCashfreeConfig = () => {
  * @throws {Error} If required configuration is missing
  */
 const validateCashfreeConfig = () => {
+  // Skip validation if Cashfree is disabled
+  if (!CASHFREE_ENABLED) {
+    console.log('[Cashfree] Running in STUB mode - payment operations will be simulated');
+    return true;
+  }
+  
   const config = getCashfreeConfig();
   const isProduction = process.env.NODE_ENV === 'production';
   
@@ -86,6 +98,11 @@ const validateCashfreeConfig = () => {
  * @returns {boolean} True if Cashfree credentials are configured
  */
 const isCashfreeConfigured = () => {
+  // If explicitly disabled, return false
+  if (!CASHFREE_ENABLED) {
+    return false;
+  }
+  
   const config = getCashfreeConfig();
   return config.appId && 
          !config.appId.startsWith('your-') && 
@@ -93,9 +110,19 @@ const isCashfreeConfigured = () => {
          !config.secretKey.startsWith('your-');
 };
 
+/**
+ * Check if Cashfree is in stub mode
+ * @returns {boolean} True if running in stub mode
+ */
+const isStubMode = () => {
+  return !CASHFREE_ENABLED || !isCashfreeConfigured();
+};
+
 module.exports = {
   getCashfreeConfig,
   validateCashfreeConfig,
   isCashfreeConfigured,
-  CASHFREE_ENVIRONMENTS
+  isStubMode,
+  CASHFREE_ENVIRONMENTS,
+  CASHFREE_ENABLED
 };

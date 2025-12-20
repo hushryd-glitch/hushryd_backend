@@ -2,12 +2,24 @@
  * Cashfree Payment Gateway Service
  * Implements authenticated API client with idempotency key support
  * Requirements: 7.1, 7.5, 12.1
+ * 
+ * NOTE: When CASHFREE_ENABLED=false or credentials are not configured,
+ * this service operates in STUB mode and simulates all payment operations.
  */
 
 const crypto = require('crypto');
-const { Cashfree } = require('cashfree-pg');
-const { getCashfreeConfig, isCashfreeConfigured } = require('../config/cashfree');
+const { getCashfreeConfig, isCashfreeConfigured, isStubMode } = require('../config/cashfree');
 const { getCircuitBreaker, CircuitState } = require('./circuitBreakerService');
+
+// Conditionally require Cashfree SDK only if configured
+let Cashfree = null;
+try {
+  if (!isStubMode()) {
+    Cashfree = require('cashfree-pg').Cashfree;
+  }
+} catch (err) {
+  console.log('[CashfreeService] Cashfree SDK not loaded - running in stub mode');
+}
 
 // Circuit breaker for Cashfree API calls
 const CASHFREE_CIRCUIT_BREAKER = 'cashfree-payment';
@@ -24,6 +36,20 @@ const CIRCUIT_BREAKER_CONFIG = {
 };
 
 /**
+ * Log stub mode operation
+ */
+const logStubOperation = (operation, data) => {
+  console.log('\n╔══════════════════════════════════════════════════════════════╗');
+  console.log('║              💳 CASHFREE PAYMENT (STUB MODE)                  ║');
+  console.log('╠══════════════════════════════════════════════════════════════╣');
+  console.log(`║  Operation: ${operation.padEnd(46)}║`);
+  if (data.orderId) console.log(`║  Order ID: ${data.orderId.padEnd(47)}║`);
+  if (data.amount) console.log(`║  Amount: ₹${String(data.amount).padEnd(48)}║`);
+  if (data.status) console.log(`║  Status: ${data.status.padEnd(49)}║`);
+  console.log('╚══════════════════════════════════════════════════════════════╝\n');
+};
+
+/**
  * Generate a unique idempotency key for payment requests
  * @param {string} prefix - Optional prefix for the key
  * @returns {string} Unique idempotency key
@@ -36,9 +62,13 @@ const generateIdempotencyKey = (prefix = 'cf') => {
 
 /**
  * Initialize Cashfree SDK with credentials
- * @returns {Object} Initialized Cashfree instance
+ * @returns {Object} Initialized Cashfree instance or null in stub mode
  */
 const initializeCashfree = () => {
+  if (isStubMode() || !Cashfree) {
+    return null;
+  }
+  
   const config = getCashfreeConfig();
   
   Cashfree.XClientId = config.appId;
@@ -141,6 +171,7 @@ const executeWithCircuitBreaker = async (apiCall, operation = 'unknown', options
 
 /**
  * Create a payment order with authorization (hold) mode
+ * In stub mode, returns a simulated successful order
  * @param {Object} orderData - Order creation data
  * @param {string} orderData.orderId - Unique order ID
  * @param {number} orderData.amount - Order amount in INR
@@ -150,6 +181,24 @@ const executeWithCircuitBreaker = async (apiCall, operation = 'unknown', options
  * @returns {Promise<Object>} Created order with payment session
  */
 const createOrder = async (orderData) => {
+  // STUB MODE: Return simulated order
+  if (isStubMode()) {
+    const stubOrderId = orderData.orderId || `STUB_ORD_${Date.now()}`;
+    const stubResponse = {
+      orderId: stubOrderId,
+      orderStatus: 'ACTIVE',
+      paymentSessionId: `stub_session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      orderAmount: orderData.amount,
+      orderCurrency: orderData.currency || 'INR',
+      cfOrderId: `stub_cf_${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      stubMode: true
+    };
+    
+    logStubOperation('CREATE ORDER', { orderId: stubOrderId, amount: orderData.amount, status: 'ACTIVE' });
+    return stubResponse;
+  }
+  
   if (!isCashfreeConfigured()) {
     throw new Error('Cashfree is not configured. Please set CASHFREE_APP_ID and CASHFREE_SECRET_KEY');
   }
@@ -198,6 +247,29 @@ const createOrder = async (orderData) => {
  * @returns {Promise<Object>} Order details
  */
 const getOrder = async (orderId) => {
+  // STUB MODE: Return simulated order details
+  if (isStubMode()) {
+    const stubResponse = {
+      orderId: orderId,
+      orderStatus: 'PAID',
+      orderAmount: 500,
+      orderCurrency: 'INR',
+      cfOrderId: `stub_cf_${orderId}`,
+      customerDetails: { customerId: 'stub_customer' },
+      orderMeta: {},
+      payments: [{
+        cfPaymentId: `stub_pay_${Date.now()}`,
+        paymentStatus: 'SUCCESS',
+        paymentAmount: 500,
+        paymentMethod: 'upi'
+      }],
+      createdAt: new Date().toISOString(),
+      stubMode: true
+    };
+    
+    logStubOperation('GET ORDER', { orderId, status: 'PAID' });
+    return stubResponse;
+  }
   if (!isCashfreeConfigured()) {
     throw new Error('Cashfree is not configured');
   }
