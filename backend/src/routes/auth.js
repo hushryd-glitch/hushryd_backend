@@ -103,6 +103,14 @@ router.post('/request-otp', otpRequestLimiter, validate(requestOTPSchema), async
   try {
     const { identifier, type } = req.body;
     
+    console.log('\n');
+    console.log('╔══════════════════════════════════════════════════════════════╗');
+    console.log('║              📱 OTP REQUEST RECEIVED                          ║');
+    console.log('╠══════════════════════════════════════════════════════════════╣');
+    console.log(`║  Phone: ${identifier.padEnd(52)}║`);
+    console.log(`║  Type: ${type.padEnd(53)}║`);
+    console.log('╚══════════════════════════════════════════════════════════════╝');
+    
     // Generate and store OTP
     const { otp, expiresAt } = await generateOTP(identifier, type);
     
@@ -157,7 +165,7 @@ router.post('/request-otp', otpRequestLimiter, validate(requestOTPSchema), async
 // Demo OTP for development/testing - allows bypass with "123456"
 // Can be enabled in production by setting ENABLE_DEMO_OTP=true
 const DEMO_OTP = '123456';
-const DEMO_OTP_ENABLED = process.env.NODE_ENV !== 'production' || process.env.ENABLE_DEMO_OTP === 'true';
+const DEMO_OTP_ENABLED = process.env.NODE_ENV !== 'production' || process.env.ENABLE_DEMO_OTP === 'true' || process.env.DEMO_OTP_ENABLED === 'true';
 
 /**
  * POST /api/auth/verify-otp

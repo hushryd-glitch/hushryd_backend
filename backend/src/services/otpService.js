@@ -20,8 +20,8 @@ const SMS_MAX_RETRIES = 3;
 const SMS_RETRY_INTERVAL_MS = 10000; // 10 seconds
 
 // Demo OTP for testing - always works with code "123456"
-// Set DEMO_OTP_ENABLED=true in .env to enable
-const DEMO_OTP_ENABLED = process.env.DEMO_OTP_ENABLED === 'true' || process.env.NODE_ENV !== 'production';
+// Set ENABLE_DEMO_OTP=true in .env to enable
+const DEMO_OTP_ENABLED = process.env.ENABLE_DEMO_OTP === 'true' || process.env.DEMO_OTP_ENABLED === 'true' || process.env.NODE_ENV !== 'production';
 const DEMO_OTP_CODE = '123456';
 
 /**
@@ -118,13 +118,19 @@ const generateOTP = async (identifier, type) => {
   
   // Log OTP to console for development/testing
   // TODO: Remove this in production!
-  console.log('\n========================================');
-  console.log(`🔐 OTP for ${maskPhoneNumber(identifier)}: ${plainOTP}`);
-  console.log(`   Expires in ${OTP_EXPIRY_MINUTES} minutes`);
+  console.log('\n');
+  console.log('╔══════════════════════════════════════════════════════════════╗');
+  console.log('║                    🔐 OTP VERIFICATION CODE                   ║');
+  console.log('╠══════════════════════════════════════════════════════════════╣');
+  console.log(`║  Phone: ${maskPhoneNumber(identifier).padEnd(52)}║`);
+  console.log(`║  OTP Code: ${plainOTP.padEnd(49)}║`);
+  console.log(`║  Expires in: ${OTP_EXPIRY_MINUTES} minutes${' '.repeat(44)}║`);
   if (DEMO_OTP_ENABLED) {
-    console.log(`   💡 Demo OTP: ${DEMO_OTP_CODE} (always works)`);
+    console.log('╠══════════════════════════════════════════════════════════════╣');
+    console.log(`║  💡 Demo OTP: ${DEMO_OTP_CODE} (always works in dev mode)${' '.repeat(17)}║`);
   }
-  console.log('========================================\n');
+  console.log('╚══════════════════════════════════════════════════════════════╝');
+  console.log('\n');
   
   // Hash the OTP for secure storage
   const hashedOTP = await bcrypt.hash(plainOTP, BCRYPT_SALT_ROUNDS);
